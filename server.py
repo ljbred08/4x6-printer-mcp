@@ -417,89 +417,102 @@ class PrinterMCPServer:
             return f"Error running PDFtoPrinter: {str(e)}"
 
     def find_optimal_scaling(self, content, format4x6, debug=False) -> tuple:
-        """Find optimal font size and spacing scale to fit content on two 4x6 pages."""
-        base_font_size = 10.0
-        min_font_size = 5.0
+        """Find optimal font size and spacing scale to fit content on two 4x6 pages with readability prioritized."""
+        max_font_size = 12.0
+        min_font_size = 6.0  # Readable minimum
+        default_spacing_scale = 0.85  # Realistic default spacing
 
         if not format4x6:
-            return base_font_size, 1.0
+            return 10.0, 1.0
 
         # Available space for two 4x6 pages
         page_height = 4 * inch
         margin = 0.25 * inch
         usable_height = (page_height - 2 * margin) * 2  # Two pages
 
-        current_font_size = base_font_size
-        current_spacing_scale = 1.0
-        min_spacing_scale = 0.5  # Don't go below 50% of original spacing
+        if debug:
+            print(f"Target height: {usable_height:.1f} points (two 4x6 pages)", file=sys.stderr)
 
-        def calculate_font_sizes(font_size, spacing_scale):
-            return {
-                'title': font_size + 4.0,
-                'h1': font_size + 4.0,
-                'h2': font_size + 2.0,
-                'h3': font_size + 1.0,
-                'body': font_size,
-                'leading_body': font_size * max(1.1, 1.3 * spacing_scale)
-            }
+        # Quick content analysis to catch obviously too-long content
+        lines = [line.strip() for line in content.split('\n') if line.strip()]
+        if len(lines) > 200:  # Rough heuristic: too many lines
+            raise Exception(f"Content appears too long ({len(lines)} lines). Maximum recommended is ~150 lines for 4x6 format.")
 
-        def calculate_spacing(font_size, spacing_scale):
-            base_spacing = font_size * 0.6
-            return {
-                'space_after_body': max(2, base_spacing * spacing_scale),
-                'space_after_h1': max(8, (font_size + 4.0) * 0.8 * spacing_scale),
-                'space_after_h2': max(6, (font_size + 2.0) * 0.8 * spacing_scale),
-                'space_after_h3': max(4, (font_size + 1.0) * 0.7 * spacing_scale),
-                'space_before_h1': max(10, (font_size + 4.0) * 1.0 * spacing_scale),
-                'space_before_h2': max(8, (font_size + 2.0) * 0.9 * spacing_scale),
-                'space_before_h3': max(6, (font_size + 1.0) * 0.8 * spacing_scale),
-                'space_after_title': max(8, (font_size + 4.0) * 0.8 * spacing_scale)
-            }
-
-        def estimate_height(content, font_sizes, spacing):
-            lines = content.split('\n')
+        def estimate_realistic_height(content, font_size, spacing_scale):
+            """More realistic height estimation using actual line spacing."""
             total_height = 0
+            lines = content.split('\n')
+
+            # Font sizes for different elements
+            h1_size = font_size + 2.0
+            h2_size = font_size + 1.0
+            h3_size = font_size + 0.5
+
             for line in lines:
                 line = line.strip()
                 if not line:
-                    total_height += spacing['space_after_body'] * 0.5
+                    # Empty line = 0.7 * line height
+                    total_height += font_size * 0.7
                 elif line.startswith('# '):
-                    total_height += font_sizes['h1'] + spacing['space_before_h1'] + spacing['space_after_h1']
+                    # H1: font height + modest spacing
+                    total_height += h1_size + (h1_size * 0.4)
                 elif line.startswith('## '):
-                    total_height += font_sizes['h2'] + spacing['space_before_h2'] + spacing['space_after_h2']
+                    # H2: font height + modest spacing
+                    total_height += h2_size + (h2_size * 0.3)
                 elif line.startswith('### '):
-                    total_height += font_sizes['h3'] + spacing['space_before_h3'] + spacing['space_after_h3']
+                    # H3: font height + modest spacing
+                    total_height += h3_size + (h3_size * 0.2)
                 else:
-                    total_height += font_sizes['body'] + spacing['space_after_body']
+                    # Body text: line height with proper spacing
+                    total_height += font_size * max(1.15, 1.4 * spacing_scale)
+
             return total_height
 
+        # Binary search for optimal font size (prioritizing readability)
+        best_font = min_font_size
+        best_spacing = 1.0
+
+        # Start from largest font and work down
+        test_font = max_font_size
+        while test_font >= min_font_size:
+            # Test with reasonable spacing first
+            test_spacing = default_spacing_scale
+
+            estimated_height = estimate_realistic_height(content, test_font, test_spacing)
+
+            if debug:
+                print(f"Testing: font={test_font:.1f}pt, spacing={test_spacing:.2f}, height={estimated_height:.1f}", file=sys.stderr)
+
+            if estimated_height <= usable_height:
+                # This font size works, try to optimize spacing for better readability
+                best_spacing = test_spacing
+                best_font = test_font
+
+                # Try to reduce spacing slightly for better readability
+                for spacing_test in [test_spacing - 0.1, test_spacing - 0.05]:
+                    if spacing_test >= 0.6:  # Minimum readable spacing
+                        test_height = estimate_realistic_height(content, test_font, spacing_test)
+                        if test_height <= usable_height:
+                            best_spacing = spacing_test
+                            if debug:
+                                print(f"  Improved spacing to {spacing_test:.2f}", file=sys.stderr)
+                        else:
+                            break
+
+                # Found a good font size, no need to try smaller fonts
+                break
+
+            test_font -= 0.5
+
+        # Check if we found a readable solution
+        if best_font < min_font_size:
+            raise Exception(f"Content is too long to fit on two 4x6 pages even at minimum readable font size ({min_font_size}pt). "
+                           f"Please reduce content length or use regular page format.")
+
         if debug:
-            print(f"Target height: {usable_height:.1f} points", file=sys.stderr)
-            print(f"Starting: font={current_font_size:.1f}pt, spacing={current_spacing_scale:.2f}", file=sys.stderr)
+            print(f"OPTIMAL: font={best_font:.1f}pt, spacing={best_spacing:.2f}, height={estimate_realistic_height(content, best_font, best_spacing):.1f}", file=sys.stderr)
 
-        # Multi-dimensional fitting loop
-        while current_font_size >= min_font_size:
-            test_spacing_scale = current_spacing_scale
-            while test_spacing_scale >= min_spacing_scale:
-                font_sizes = calculate_font_sizes(current_font_size, test_spacing_scale)
-                spacing = calculate_spacing(current_font_size, test_spacing_scale)
-
-                estimated_height = estimate_height(content, font_sizes, spacing)
-
-                if debug:
-                    print(f"Trying: font={current_font_size:.1f}pt, spacing={test_spacing_scale:.2f}, height={estimated_height:.1f}", file=sys.stderr)
-
-                if estimated_height <= usable_height:
-                    if debug:
-                        print(f"FIT: font={current_font_size:.1f}pt, spacing={test_spacing_scale:.2f}, height={estimated_height:.1f} <= {usable_height:.1f}", file=sys.stderr)
-                    return current_font_size, test_spacing_scale
-
-                test_spacing_scale -= 0.1
-
-            current_font_size -= 0.5
-            current_spacing_scale = 1.0
-
-        return min_font_size, min_spacing_scale
+        return best_font, best_spacing
 
     def find_optimal_scaling_with_verification(self, content, format4x6, debug=False) -> tuple:
         """Enhanced auto-shrinking with actual PDF page count verification.
@@ -565,14 +578,14 @@ class PrinterMCPServer:
                             if debug:
                                 print(f"Reducing font to {current_font:.1f}pt", file=sys.stderr)
                         else:
-                            # We're at minimums, return current values
-                            if debug:
-                                print("At minimum values, returning current settings", file=sys.stderr)
+                            # We're at minimum readable font size, content doesn't fit
                             try:
                                 os.remove(test_pdf)
                             except:
                                 pass
-                            return current_font, current_spacing
+                            raise Exception(f"Content is too long to fit on two 4x6 pages even at minimum readable font size (6pt) "
+                                          f"and minimum spacing (0.6). Content required {actual_pages} pages. "
+                                          f"Please reduce content length or use regular page format.")
 
                     # Clean up test PDF for next iteration
                     try:
