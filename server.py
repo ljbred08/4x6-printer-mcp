@@ -268,10 +268,7 @@ class PrinterMCPServer:
             # Create formatted PDF
             pdf_file = self.create_formatted_pdf(content, filename, format4x6, debug)
             if not pdf_file:
-                return "Error: Failed to create PDF file. Check stderr for detailed error information."
-
-            if debug:
-                print(f"Created PDF: {pdf_file}", file=sys.stderr)
+                return "Error: Failed to create PDF file"
 
             # Print using PDFtoPrinter
             result = await self.print_with_pdftoprinter(pdf_file, printer_name, debug)
@@ -279,7 +276,11 @@ class PrinterMCPServer:
             return result
 
         except Exception as e:
-            return f"Error during printing: {str(e)}\n{traceback.format_exc()}"
+            # Return the full error with traceback for debugging
+            error_msg = f"Error creating or printing PDF: {str(e)}"
+            if debug:
+                error_msg += f"\n{traceback.format_exc()}"
+            return error_msg
 
     async def print_with_pdftoprinter(self, pdf_file: str, printer_name: Optional[str] = None, debug: bool = False) -> str:
         """Print PDF using PDFtoPrinter.exe."""
@@ -458,14 +459,14 @@ class PrinterMCPServer:
 
             # Process content
             if MARKDOWN_AVAILABLE:
-                # Use markdown library for processing
+                # Use markdown library for processing with enhanced list support
                 md = markdown.Markdown(
-                    extensions=['tables', 'fenced_code', 'nl2br'],
+                    extensions=['tables', 'fenced_code', 'nl2br', 'toc'],
                     output_format='html'
                 )
                 html_content = md.convert(content)
 
-                # Convert HTML to paragraphs
+                # Convert HTML to paragraphs with enhanced list processing
                 paragraphs = self._html_to_paragraphs(html_content, body_style, heading1_style, heading2_style, heading3_style)
 
                 # For 4x6 cards, try to keep content together
@@ -474,23 +475,82 @@ class PrinterMCPServer:
                 else:
                     story.extend(paragraphs)
             else:
-                # Fallback: Basic text processing
+                # Fallback: Enhanced markdown processing with list support
                 lines = content.split('\n')
+                in_list = False
+                list_counter = 0
+                ordered_list = False
+
                 for line in lines:
+                    original_line = line
                     line = line.strip()
+
                     if not line:
+                        if not in_list:
+                            story.append(Spacer(1, 6))
+                        continue
+
+                    # Check for ordered lists (1. 2. 3. etc.)
+                    ordered_match = re.match(r'^(\d+)\.\s+(.*)', line)
+                    if ordered_match:
+                        if not in_list:
+                            in_list = True
+                            ordered_list = True
+                            list_counter = int(ordered_match.group(1))
+                        elif not ordered_list:
+                            # Starting new ordered list
+                            ordered_list = True
+                            list_counter = int(ordered_match.group(1))
+                        else:
+                            list_counter += 1
+
+                        content = ordered_match.group(2).strip()
+                        content = content.replace('"', '&quot;').replace("'", '&#39;')
+                        story.append(Paragraph(f"{list_counter}. {content}", body_style))
+                        continue
+
+                    # Check for unordered lists (-, *, +)
+                    unordered_match = re.match(r'^[-\*+]\s+(.*)', line)
+                    if unordered_match:
+                        if not in_list:
+                            in_list = True
+                            ordered_list = False
+                        elif ordered_list:
+                            # Switching to unordered list
+                            ordered_list = False
+
+                        content = unordered_match.group(1).strip()
+                        content = content.replace('"', '&quot;').replace("'", '&#39;')
+                        story.append(Paragraph(f"• {content}", body_style))
+                        continue
+
+                    # If we were in a list and this isn't a list item, end the list
+                    if in_list:
+                        in_list = False
+                        ordered_list = False
                         story.append(Spacer(1, 6))
-                    elif line.startswith('# '):
-                        story.append(Paragraph(line[2:], heading1_style))
+
+                    # Handle headers
+                    if line.startswith('# '):
+                        heading_text = line[2:].strip()
+                        heading_text = heading_text.replace('"', '&quot;').replace("'", '&#39;')
+                        story.append(Paragraph(heading_text, heading1_style))
                     elif line.startswith('## '):
-                        story.append(Paragraph(line[3:], heading2_style))
+                        heading_text = line[3:].strip()
+                        heading_text = heading_text.replace('"', '&quot;').replace("'", '&#39;')
+                        story.append(Paragraph(heading_text, heading2_style))
                     elif line.startswith('### '):
-                        story.append(Paragraph(line[4:], heading3_style))
+                        heading_text = line[4:].strip()
+                        heading_text = heading_text.replace('"', '&quot;').replace("'", '&#39;')
+                        story.append(Paragraph(heading_text, heading3_style))
                     else:
-                        # Simple formatting for bold and italic
+                        # Simple formatting for bold and italic with sanitization
                         formatted_line = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', line)
                         formatted_line = re.sub(r'\*(.*?)\*', r'<i>\1</i>', formatted_line)
-                        story.append(Paragraph(formatted_line, body_style))
+                        # Sanitize the final text
+                        formatted_line = formatted_line.replace('"', '&quot;').replace("'", '&#39;')
+                        if formatted_line:
+                            story.append(Paragraph(formatted_line, body_style))
 
             # Build PDF
             doc.build(story)
@@ -506,47 +566,104 @@ class PrinterMCPServer:
 
         except Exception as e:
             error_msg = f"Error creating PDF: {e}"
-            print(error_msg, file=sys.stderr)
             if debug:
                 import traceback
-                print(f"Full traceback: {traceback.format_exc()}", file=sys.stderr)
-            return None
+                error_msg += f"\nFull traceback: {traceback.format_exc()}"
+            # Return the error as a string instead of printing to stderr
+            raise Exception(error_msg)
 
     def _html_to_paragraphs(self, html_content: str, body_style, h1_style, h2_style, h3_style):
-        """Convert HTML content to ReportLab paragraphs."""
+        """Convert HTML content to ReportLab paragraphs with enhanced list support."""
         paragraphs = []
         lines = html_content.split('\n')
+
+        in_ul = False
+        in_ol = False
+        list_counter = 0
+
+        def sanitize_text(text):
+            """Sanitize text for ReportLab Paragraph objects."""
+            # Remove or replace problematic characters
+            text = text.replace('"', '&quot;')
+            text = text.replace("'", '&#39;')
+            # Ensure the text is properly escaped for XML/HTML
+            import html
+            return html.escape(text)
 
         for line in lines:
             line = line.strip()
             if not line:
+                if not in_ul and not in_ol:
+                    paragraphs.append(Spacer(1, 6))
+                continue
+
+            # Handle list containers
+            if line == '<ul>':
+                in_ul = True
+                continue
+            elif line == '</ul>':
+                in_ul = False
+                paragraphs.append(Spacer(1, 6))
+                continue
+            elif line == '<ol>':
+                in_ol = True
+                list_counter = 0
+                continue
+            elif line == '</ol>':
+                in_ol = False
                 paragraphs.append(Spacer(1, 6))
                 continue
 
             # Handle headers
             if line.startswith('<h1>'):
                 content = re.sub(r'</?h1>', '', line)
+                content = sanitize_text(content)
                 paragraphs.append(Paragraph(content, h1_style))
             elif line.startswith('<h2>'):
                 content = re.sub(r'</?h2>', '', line)
+                content = sanitize_text(content)
                 paragraphs.append(Paragraph(content, h2_style))
             elif line.startswith('<h3>'):
                 content = re.sub(r'</?h3>', '', line)
+                content = sanitize_text(content)
                 paragraphs.append(Paragraph(content, h3_style))
             elif line.startswith('<li>'):
                 content = re.sub(r'</?li>', '', line)
-                content = f"• {content}"
+                content = sanitize_text(content)
+
+                if in_ul:
+                    # Unordered list item
+                    content = f"• {content}"
+                elif in_ol:
+                    # Ordered list item
+                    list_counter += 1
+                    content = f"{list_counter}. {content}"
+                else:
+                    # Standalone list item
+                    content = f"• {content}"
+
                 paragraphs.append(Paragraph(content, body_style))
             elif line.startswith('<p>'):
                 content = re.sub(r'</?p>', '', line)
+                content = sanitize_text(content)
                 paragraphs.append(Paragraph(content, body_style))
-            elif line.startswith('<div') or line.startswith('</div>') or line.startswith('</ul>') or line.startswith('</ol>') or line.startswith('<ul>') or line.startswith('<ol>'):
+            elif line.startswith('<div') or line.startswith('</div>'):
                 continue  # Skip container tags
             else:
-                # Regular paragraph
+                # Regular paragraph - sanitize content
                 if not line.startswith('<'):
-                    line = f'<p>{line}</p>'
-                paragraphs.append(Paragraph(line, body_style))
+                    content = sanitize_text(line)
+                    paragraphs.append(Paragraph(content, body_style))
+                else:
+                    # HTML content - try to render as-is
+                    try:
+                        paragraphs.append(Paragraph(line, body_style))
+                    except:
+                        # If it fails, extract text and render as plain
+                        text_content = re.sub(r'<[^>]+>', '', line)
+                        text_content = sanitize_text(text_content)
+                        if text_content:
+                            paragraphs.append(Paragraph(text_content, body_style))
 
         return paragraphs
 
