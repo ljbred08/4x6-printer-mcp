@@ -325,6 +325,123 @@ class PrinterMCPServer:
         except Exception as e:
             return f"Error running PDFtoPrinter: {str(e)}"
 
+    def calculate_font_sizes_for_4x6(self, base_font_size: float = 10.0, min_font_size: float = 6.0) -> Dict[str, float]:
+        """Calculate font sizes for 4x6 format with dynamic scaling."""
+        return {
+            'title': base_font_size + 4.0,  # 14pt at base 10pt
+            'h1': base_font_size + 4.0,     # 14pt at base 10pt
+            'h2': base_font_size + 2.0,     # 12pt at base 10pt
+            'h3': base_font_size + 1.0,     # 11pt at base 10pt
+            'body': base_font_size,         # 10pt at base 10pt
+            'leading_body': base_font_size + 2.0  # 12pt leading at base 10pt
+        }
+
+    def estimate_content_height(self, story, page_width, page_height, debug=False) -> float:
+        """Estimate the total height of content in points."""
+        total_height = 0
+        for item in story:
+            if hasattr(item, '__class__') and 'Paragraph' in str(item.__class__):
+                # Rough estimation: each paragraph takes up its font size + spacing
+                style = item.style
+                font_size = style.fontSize
+                space_after = getattr(style, 'spaceAfter', 0)
+                space_before = getattr(style, 'spaceBefore', 0)
+                total_height += font_size + space_after + space_before + 6  # Add some padding
+            elif hasattr(item, '__class__') and 'Spacer' in str(item.__class__):
+                total_height += item.height
+            else:
+                total_height += 12  # Default estimate
+
+        if debug:
+            print(f"Estimated content height: {total_height} points", file=sys.stderr)
+        return total_height
+
+    def test_content_fit(self, content, font_sizes, format4x6, debug=False) -> bool:
+        """Test if content fits on two 4x6 pages with given font sizes."""
+        if not format4x6:
+            return True  # No size constraints for regular pages
+
+        # Create temporary styles with test font sizes
+        styles = getSampleStyleSheet()
+
+        # Calculate available space for two 4x6 pages
+        page_width = 6 * inch
+        page_height = 4 * inch
+        margin = 0.25 * inch
+        usable_height = (page_height - 2 * margin) * 2  # Two pages
+        usable_width = page_width - 2 * margin
+
+        # Create test styles
+        test_body_style = ParagraphStyle(
+            'TestBody',
+            parent=styles['Normal'],
+            fontSize=font_sizes['body'],
+            spaceAfter=6,
+            leading=font_sizes['leading_body']
+        )
+
+        test_h1_style = ParagraphStyle(
+            'TestH1',
+            parent=styles['Heading1'],
+            fontSize=font_sizes['h1'],
+            spaceAfter=12,
+            spaceBefore=15
+        )
+
+        test_h2_style = ParagraphStyle(
+            'TestH2',
+            parent=styles['Heading2'],
+            fontSize=font_sizes['h2'],
+            spaceAfter=10,
+            spaceBefore=12
+        )
+
+        test_h3_style = ParagraphStyle(
+            'TestH3',
+            parent=styles['Heading3'],
+            fontSize=font_sizes['h3'],
+            spaceAfter=8,
+            spaceBefore=10
+        )
+
+        # Process content into story (simplified version)
+        story = []
+        lines = content.split('\n')
+
+        for line in lines:
+            line = line.strip()
+            if not line:
+                story.append(Spacer(1, 6))
+            elif line.startswith('# '):
+                story.append(Paragraph(line[2:], test_h1_style))
+            elif line.startswith('## '):
+                story.append(Paragraph(line[3:], test_h2_style))
+            elif line.startswith('### '):
+                story.append(Paragraph(line[4:], test_h3_style))
+            else:
+                # Simple formatting for list items
+                if re.match(r'^[a-z]\.', line) or re.match(r'^\d+\.', line) or line.startswith('- '):
+                    # Convert lettered lists and dashes to bullets, keep numbered lists
+                    if re.match(r'^[a-z]\.', line):
+                        formatted_line = re.sub(r'^[a-z]\.\s*', '• ', line)
+                    elif line.startswith('- '):
+                        formatted_line = re.sub(r'^-\s*', '• ', line)
+                    else:
+                        formatted_line = line  # Keep numbered lists unchanged
+                    story.append(Paragraph(formatted_line, test_body_style))
+                else:
+                    story.append(Paragraph(line, test_body_style))
+
+        # Estimate total height
+        estimated_height = self.estimate_content_height(story, usable_width, usable_height, debug)
+
+        if debug:
+            print(f"Usable height for two 4x6 pages: {usable_height} points", file=sys.stderr)
+            print(f"Estimated content height: {estimated_height} points", file=sys.stderr)
+            print(f"Content fits: {estimated_height <= usable_height}", file=sys.stderr)
+
+        return estimated_height <= usable_height
+
     def create_formatted_pdf(self, content: str, filename: Optional[str] = None,
                             format4x6: bool = False, debug: bool = False) -> Optional[str]:
         """Create a formatted PDF from content."""
@@ -367,11 +484,39 @@ class PrinterMCPServer:
             styles = getSampleStyleSheet()
 
             if format4x6:
-                # 4x6 optimized font sizes
+                # Dynamic font sizing for 4x6 format
+                current_font_size = 10.0  # Start with 10pt
+                min_font_size = 6.0
+
+                if debug:
+                    print(f"Starting dynamic font sizing at {current_font_size}pt", file=sys.stderr)
+
+                # Try to find the optimal font size
+                while current_font_size >= min_font_size:
+                    font_sizes = self.calculate_font_sizes_for_4x6(current_font_size, min_font_size)
+
+                    if self.test_content_fit(content, font_sizes, format4x6, debug):
+                        if debug:
+                            print(f"Content fits at {current_font_size}pt", file=sys.stderr)
+                        break
+                    else:
+                        current_font_size -= 0.5
+                        if debug:
+                            print(f"Content too large, reducing font size to {current_font_size}pt", file=sys.stderr)
+
+                if current_font_size < min_font_size:
+                    # Content won't fit even at minimum font size, use minimum anyway
+                    current_font_size = min_font_size
+                    if debug:
+                        print(f"Content won't fit even at minimum size, using {current_font_size}pt", file=sys.stderr)
+
+                font_sizes = self.calculate_font_sizes_for_4x6(current_font_size, min_font_size)
+
+                # Create styles with calculated font sizes
                 title_style = ParagraphStyle(
                     'CustomTitle4x6',
                     parent=styles['Heading1'],
-                    fontSize=14,
+                    fontSize=font_sizes['title'],
                     spaceAfter=12,
                     alignment=1  # Center
                 )
@@ -379,7 +524,7 @@ class PrinterMCPServer:
                 heading1_style = ParagraphStyle(
                     'CustomH1_4x6',
                     parent=styles['Heading1'],
-                    fontSize=14,
+                    fontSize=font_sizes['h1'],
                     spaceAfter=12,
                     spaceBefore=15
                 )
@@ -387,7 +532,7 @@ class PrinterMCPServer:
                 heading2_style = ParagraphStyle(
                     'CustomH2_4x6',
                     parent=styles['Heading2'],
-                    fontSize=12,
+                    fontSize=font_sizes['h2'],
                     spaceAfter=10,
                     spaceBefore=12
                 )
@@ -395,7 +540,7 @@ class PrinterMCPServer:
                 heading3_style = ParagraphStyle(
                     'CustomH3_4x6',
                     parent=styles['Heading3'],
-                    fontSize=11,
+                    fontSize=font_sizes['h3'],
                     spaceAfter=8,
                     spaceBefore=10
                 )
@@ -403,9 +548,9 @@ class PrinterMCPServer:
                 body_style = ParagraphStyle(
                     'CustomBody_4x6',
                     parent=styles['Normal'],
-                    fontSize=10,
+                    fontSize=font_sizes['body'],
                     spaceAfter=6,
-                    leading=12
+                    leading=font_sizes['leading_body']
                 )
             else:
                 # Standard document font sizes
@@ -505,7 +650,10 @@ class PrinterMCPServer:
                             list_counter += 1
 
                         content = ordered_match.group(2).strip()
-                        content = content.replace('"', '&quot;').replace("'", '&#39;')
+                        # Decode HTML entities and sanitize for ReportLab
+                        import html
+                        content = html.unescape(content)
+                        content = content.replace('<', '&lt;').replace('>', '&gt;').replace('&', '&amp;')
                         story.append(Paragraph(f"{list_counter}. {content}", body_style))
                         continue
 
@@ -520,7 +668,10 @@ class PrinterMCPServer:
                             ordered_list = False
 
                         content = unordered_match.group(1).strip()
-                        content = content.replace('"', '&quot;').replace("'", '&#39;')
+                        # Decode HTML entities and sanitize for ReportLab
+                        import html
+                        content = html.unescape(content)
+                        content = content.replace('<', '&lt;').replace('>', '&gt;').replace('&', '&amp;')
                         story.append(Paragraph(f"• {content}", body_style))
                         continue
 
@@ -533,22 +684,31 @@ class PrinterMCPServer:
                     # Handle headers
                     if line.startswith('# '):
                         heading_text = line[2:].strip()
-                        heading_text = heading_text.replace('"', '&quot;').replace("'", '&#39;')
+                        # Decode HTML entities and sanitize for ReportLab
+                        import html
+                        heading_text = html.unescape(heading_text)
+                        heading_text = heading_text.replace('<', '&lt;').replace('>', '&gt;').replace('&', '&amp;')
                         story.append(Paragraph(heading_text, heading1_style))
                     elif line.startswith('## '):
                         heading_text = line[3:].strip()
-                        heading_text = heading_text.replace('"', '&quot;').replace("'", '&#39;')
+                        import html
+                        heading_text = html.unescape(heading_text)
+                        heading_text = heading_text.replace('<', '&lt;').replace('>', '&gt;').replace('&', '&amp;')
                         story.append(Paragraph(heading_text, heading2_style))
                     elif line.startswith('### '):
                         heading_text = line[4:].strip()
-                        heading_text = heading_text.replace('"', '&quot;').replace("'", '&#39;')
+                        import html
+                        heading_text = html.unescape(heading_text)
+                        heading_text = heading_text.replace('<', '&lt;').replace('>', '&gt;').replace('&', '&amp;')
                         story.append(Paragraph(heading_text, heading3_style))
                     else:
                         # Simple formatting for bold and italic with sanitization
                         formatted_line = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', line)
                         formatted_line = re.sub(r'\*(.*?)\*', r'<i>\1</i>', formatted_line)
-                        # Sanitize the final text
-                        formatted_line = formatted_line.replace('"', '&quot;').replace("'", '&#39;')
+                        # Decode HTML entities and sanitize the final text
+                        import html
+                        formatted_line = html.unescape(formatted_line)
+                        formatted_line = formatted_line.replace('<', '&lt;').replace('>', '&gt;').replace('&', '&amp;')
                         if formatted_line:
                             story.append(Paragraph(formatted_line, body_style))
 
@@ -582,13 +742,15 @@ class PrinterMCPServer:
         list_counter = 0
 
         def sanitize_text(text):
-            """Sanitize text for ReportLab Paragraph objects."""
-            # Remove or replace problematic characters
-            text = text.replace('"', '&quot;')
-            text = text.replace("'", '&#39;')
-            # Ensure the text is properly escaped for XML/HTML
+            """Sanitize text for ReportLab Paragraph objects by decoding HTML entities."""
             import html
-            return html.escape(text)
+            # Decode HTML entities like &#39; back to actual characters
+            text = html.unescape(text)
+            # Escape only the characters that ReportLab can't handle
+            text = text.replace('<', '&lt;')
+            text = text.replace('>', '&gt;')
+            text = text.replace('&', '&amp;')
+            return text
 
         for line in lines:
             line = line.strip()
@@ -655,15 +817,12 @@ class PrinterMCPServer:
                     content = sanitize_text(line)
                     paragraphs.append(Paragraph(content, body_style))
                 else:
-                    # HTML content - try to render as-is
-                    try:
-                        paragraphs.append(Paragraph(line, body_style))
-                    except:
-                        # If it fails, extract text and render as plain
-                        text_content = re.sub(r'<[^>]+>', '', line)
-                        text_content = sanitize_text(text_content)
-                        if text_content:
-                            paragraphs.append(Paragraph(text_content, body_style))
+                    # HTML content - extract text and render as plain to avoid tag pollution
+                    # Remove all HTML tags but preserve text content
+                    text_content = re.sub(r'<[^>]+>', '', line)
+                    text_content = sanitize_text(text_content)
+                    if text_content.strip():
+                        paragraphs.append(Paragraph(text_content.strip(), body_style))
 
         return paragraphs
 
