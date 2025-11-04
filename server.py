@@ -685,10 +685,13 @@ class PrinterMCPServer:
             if MARKDOWN_AVAILABLE:
                 # Use markdown library for processing with enhanced list support
                 md = markdown.Markdown(
-                    extensions=['tables', 'fenced_code', 'nl2br', 'toc'],
+                    extensions=['tables', 'fenced_code', 'nl2br'],
                     output_format='html'
                 )
                 html_content = md.convert(content)
+
+                # Fix HTML tags for ReportLab compatibility
+                html_content = html_content.replace('<para>', '<p>').replace('</para>', '</p>')
 
                 # Convert HTML to paragraphs with enhanced list processing
                 paragraphs = self._html_to_paragraphs(html_content, body_style, heading1_style, heading2_style, heading3_style)
