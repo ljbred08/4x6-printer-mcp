@@ -65,6 +65,121 @@ class PrinterMCPServer:
             print(f"Error counting PDF pages: {e}", file=sys.stderr)
             return 3  # Conservative fallback
 
+    def create_test_pdf(self, content: str, font_size: float, spacing_scale: float, filename: Optional[str] = None, debug: bool = False) -> Optional[str]:
+        """Create a test PDF for page counting without adding to temp_files list."""
+        if not REPORTLAB_AVAILABLE:
+            return None
+
+        try:
+            # Create temporary PDF file
+            temp_file = tempfile.NamedTemporaryFile(mode='wb', suffix='.pdf', delete=False)
+            temp_file.close()
+            test_file_path = temp_file.name
+
+            # Set up page size for 4x6 (always use 4x6 for testing)
+            page_size = (6 * inch, 4 * inch)  # 6x4 inches (landscape 4x6)
+            margin = 0.25 * inch
+
+            # Create test document
+            doc = SimpleDocTemplate(
+                test_file_path,
+                pagesize=page_size,
+                leftMargin=margin,
+                rightMargin=margin,
+                topMargin=margin,
+                bottomMargin=margin
+            )
+
+            # Get styles and create simple test styles
+            styles = getSampleStyleSheet()
+
+            title_style = ParagraphStyle(
+                'TestTitle',
+                parent=styles['Heading1'],
+                fontSize=font_size + 4.0,
+                spaceAfter=12,
+                alignment=1  # Center
+            )
+
+            body_style = ParagraphStyle(
+                'TestBody',
+                parent=styles['Normal'],
+                fontSize=font_size,
+                spaceAfter=max(2, font_size * 0.6 * spacing_scale),
+                leading=font_size * max(1.1, 1.3 * spacing_scale)
+            )
+
+            # Create heading styles to match final PDF
+            heading1_style = ParagraphStyle(
+                'TestHeading1',
+                parent=styles['Heading1'],
+                fontSize=font_size + 2.0,
+                spaceAfter=8,
+                spaceBefore=10,
+                leading=(font_size + 2.0) * 1.2
+            )
+
+            heading2_style = ParagraphStyle(
+                'TestHeading2',
+                parent=styles['Heading2'],
+                fontSize=font_size + 1.0,
+                spaceAfter=6,
+                spaceBefore=8,
+                leading=(font_size + 1.0) * 1.2
+            )
+
+            heading3_style = ParagraphStyle(
+                'TestHeading3',
+                parent=styles['Heading3'],
+                fontSize=font_size + 0.5,
+                spaceAfter=4,
+                spaceBefore=6,
+                leading=(font_size + 0.5) * 1.2
+            )
+
+            # Create simple test story (matches final PDF structure)
+            story = []
+
+            # Add title if filename provided (matches final PDF)
+            if filename:
+                story.append(Paragraph(filename, title_style))
+                story.append(Spacer(1, 15))  # Match final PDF spacing for 4x6
+
+            # Use the SAME content processing as final PDF for identical results
+            if MARKDOWN_AVAILABLE:
+                # Use mistune library for processing (identical to final PDF)
+                md = mistune.create_markdown(renderer='html')
+                html_content = md(content)
+
+                # Convert HTML to paragraphs (identical to final PDF)
+                paragraphs = self._html_to_paragraphs(html_content, body_style, heading1_style, heading2_style, heading3_style)
+                story.extend(paragraphs)
+            else:
+                # Fallback to simple processing if mistune not available
+                lines = content.split('\n')
+                for line in lines:
+                    line = line.strip()
+                    if not line:
+                        story.append(Spacer(1, 6))
+                    elif line.startswith('# '):
+                        story.append(Paragraph(line[2:], title_style))
+                    else:
+                        story.append(Paragraph(line, body_style))
+                        story.append(Spacer(1, 3))
+
+            # Build test PDF
+            doc.build(story)
+
+            if debug:
+                print(f"Created test PDF: {test_file_path}", file=sys.stderr)
+
+            return test_file_path
+
+        except Exception as e:
+            if debug:
+                print(f"Error creating test PDF: {e}", file=sys.stderr)
+            return None
+
     def _get_pdf_printer_path(self) -> str:
         """Get the path to PDFtoPrinter.exe."""
         # Check if PDFtoPrinter.exe is in the current directory
