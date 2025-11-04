@@ -2,7 +2,7 @@
 # Minimal dependencies - PDFtoPrinter.exe handles the printing
 
 # Markdown and PDF processing
-markdown>=3.5.0
+mistune>=3.0.0
 reportlab>=4.0.0
 
 # Optional: Alternative PDF processing (not needed for basic functionality)
