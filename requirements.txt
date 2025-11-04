@@ -1,0 +1,15 @@
+# Core dependencies for Simplified Printer MCP Server
+# Minimal dependencies - PDFtoPrinter.exe handles the printing
+
+# Markdown and PDF processing
+markdown>=3.5.0
+reportlab>=4.0.0
+
+# Optional: Alternative PDF processing (not needed for basic functionality)
+# PyPDF2>=3.0.0
+# pymupdf>=1.26.0
+# Pillow>=10.0.0
+# pdf2image>=1.17.0
+
+# Note: PDFtoPrinter.exe is included as a standalone executable
+# No external dependencies required for printing functionality
