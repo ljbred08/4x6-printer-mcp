@@ -28,6 +28,13 @@ try:
 except ImportError:
     REPORTLAB_AVAILABLE = False
 
+# Page counting for PDF verification
+try:
+    from PyPDF2 import PdfReader
+    PYPDF2_AVAILABLE = True
+except ImportError:
+    PYPDF2_AVAILABLE = False
+
 # Markdown processing
 try:
     import mistune
@@ -43,6 +50,91 @@ class PrinterMCPServer:
         self.version = "2.0.0"  # Simplified version
         self.temp_files = []  # Track temporary files for cleanup
         self.pdf_printer_path = self._get_pdf_printer_path()
+
+    def count_pdf_pages(self, pdf_file_path: str) -> int:
+        """Count actual pages in generated PDF."""
+        if not PYPDF2_AVAILABLE:
+            print("Warning: PyPDF2 not available for page counting", file=sys.stderr)
+            return 3  # Conservative fallback
+
+        try:
+            with open(pdf_file_path, 'rb') as file:
+                reader = PdfReader(file)
+                return len(reader.pages)
+        except Exception as e:
+            print(f"Error counting PDF pages: {e}", file=sys.stderr)
+            return 3  # Conservative fallback
+
+    def create_test_pdf(self, content: str, font_size: float, spacing_scale: float, debug: bool = False) -> Optional[str]:
+        """Create a test PDF for page counting without adding to temp_files list."""
+        if not REPORTLAB_AVAILABLE:
+            return None
+
+        try:
+            # Create temporary PDF file
+            temp_file = tempfile.NamedTemporaryFile(mode='wb', suffix='.pdf', delete=False)
+            temp_file.close()
+            test_file_path = temp_file.name
+
+            # Set up page size for 4x6 (always use 4x6 for testing)
+            page_size = (6 * inch, 4 * inch)  # 6x4 inches (landscape 4x6)
+            margin = 0.25 * inch
+
+            # Create test document
+            doc = SimpleDocTemplate(
+                test_file_path,
+                pagesize=page_size,
+                leftMargin=margin,
+                rightMargin=margin,
+                topMargin=margin,
+                bottomMargin=margin
+            )
+
+            # Get styles and create simple test styles
+            styles = getSampleStyleSheet()
+
+            title_style = ParagraphStyle(
+                'TestTitle',
+                parent=styles['Heading1'],
+                fontSize=font_size + 4.0,
+                spaceAfter=12,
+                alignment=1  # Center
+            )
+
+            body_style = ParagraphStyle(
+                'TestBody',
+                parent=styles['Normal'],
+                fontSize=font_size,
+                spaceAfter=max(2, font_size * 0.6 * spacing_scale),
+                leading=font_size * max(1.1, 1.3 * spacing_scale)
+            )
+
+            # Create simple test story (just first few lines to test)
+            story = []
+            lines = content.split('\n')[:10]  # Just test with first 10 lines
+
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    story.append(Spacer(1, 6))
+                elif line.startswith('# '):
+                    story.append(Paragraph(line[2:], title_style))
+                else:
+                    story.append(Paragraph(line, body_style))
+                    story.append(Spacer(1, 3))
+
+            # Build test PDF
+            doc.build(story)
+
+            if debug:
+                print(f"Created test PDF: {test_file_path}", file=sys.stderr)
+
+            return test_file_path
+
+        except Exception as e:
+            if debug:
+                print(f"Error creating test PDF: {e}", file=sys.stderr)
+            return None
 
     def _get_pdf_printer_path(self) -> str:
         """Get the path to PDFtoPrinter.exe."""
@@ -408,22 +500,100 @@ class PrinterMCPServer:
             current_spacing_scale = 1.0
 
         return min_font_size, min_spacing_scale
-        for item in story:
-            if hasattr(item, '__class__') and 'Paragraph' in str(item.__class__):
-                # Rough estimation: each paragraph takes up its font size + spacing
-                style = item.style
-                font_size = style.fontSize
-                space_after = getattr(style, 'spaceAfter', 0)
-                space_before = getattr(style, 'spaceBefore', 0)
-                total_height += font_size + space_after + space_before + 6  # Add some padding
-            elif hasattr(item, '__class__') and 'Spacer' in str(item.__class__):
-                total_height += item.height
-            else:
-                total_height += 12  # Default estimate
+
+    def find_optimal_scaling_with_verification(self, content, format4x6, debug=False) -> tuple:
+        """Enhanced auto-shrinking with actual PDF page count verification.
+
+        Uses estimation for speed first, then creates test PDFs and verifies actual page count.
+        Iteratively adjusts until content fits on exactly 2 pages.
+        """
+        if not format4x6:
+            return 10.0, 1.0  # Default values for non-4x6 format
 
         if debug:
-            print(f"Estimated content height: {total_height} points", file=sys.stderr)
-        return total_height
+            print("Starting enhanced auto-shrinking with verification...", file=sys.stderr)
+
+        # Step 1: Get initial estimate using current method
+        estimated_font, estimated_spacing = self.find_optimal_scaling(content, format4x6, debug)
+
+        if debug:
+            print(f"Initial estimate: font={estimated_font:.1f}pt, spacing={estimated_spacing:.2f}", file=sys.stderr)
+
+        # Step 2: Test the estimate with actual PDF creation
+        current_font = estimated_font
+        current_spacing = estimated_spacing
+        max_iterations = 10  # Prevent infinite loops
+
+        for iteration in range(max_iterations):
+            if debug:
+                print(f"\nVerification iteration {iteration + 1}: font={current_font:.1f}pt, spacing={current_spacing:.2f}", file=sys.stderr)
+
+            # Create test PDF to verify actual page count
+            test_pdf = self.create_test_pdf(content, current_font, current_spacing, debug)
+
+            if test_pdf and os.path.exists(test_pdf):
+                try:
+                    # Count actual pages using PyPDF2
+                    actual_pages = self.count_pdf_pages(test_pdf)
+
+                    if debug:
+                        print(f"Actual page count: {actual_pages}", file=sys.stderr)
+
+                    # Success! Content fits on 2 pages
+                    if actual_pages <= 2:
+                        if debug:
+                            print(f"SUCCESS: Content fits on {actual_pages} pages with font={current_font:.1f}pt, spacing={current_spacing:.2f}", file=sys.stderr)
+                        # Clean up test PDF
+                        try:
+                            os.remove(test_pdf)
+                        except:
+                            pass
+                        return current_font, current_spacing
+
+                    # Too many pages, need to shrink more
+                    if actual_pages > 2:
+                        if debug:
+                            print(f"TOO MANY PAGES ({actual_pages}), shrinking further...", file=sys.stderr)
+
+                        # Prioritize spacing reduction first, then font size
+                        if current_spacing > 0.6:
+                            current_spacing = max(0.6, current_spacing - 0.1)
+                            if debug:
+                                print(f"Reducing spacing to {current_spacing:.2f}", file=sys.stderr)
+                        elif current_font > 6.0:
+                            current_font = max(6.0, current_font - 0.5)
+                            if debug:
+                                print(f"Reducing font to {current_font:.1f}pt", file=sys.stderr)
+                        else:
+                            # We're at minimums, return current values
+                            if debug:
+                                print("At minimum values, returning current settings", file=sys.stderr)
+                            try:
+                                os.remove(test_pdf)
+                            except:
+                                pass
+                            return current_font, current_spacing
+
+                    # Clean up test PDF for next iteration
+                    try:
+                        os.remove(test_pdf)
+                    except:
+                        pass
+
+                except Exception as e:
+                    if debug:
+                        print(f"Error during verification: {e}", file=sys.stderr)
+                    # Fall back to estimated values if verification fails
+                    break
+            else:
+                if debug:
+                    print("Failed to create test PDF, falling back to estimates", file=sys.stderr)
+                break
+
+        if debug:
+            print(f"Returning best result: font={current_font:.1f}pt, spacing={current_spacing:.2f}", file=sys.stderr)
+
+        return current_font, current_spacing
 
     def test_content_fit(self, content, font_sizes, format4x6, debug=False) -> bool:
         """Test if content fits on two 4x6 pages with given font sizes."""
@@ -557,8 +727,8 @@ class PrinterMCPServer:
                 if debug:
                     print("Starting multi-dimensional font and spacing optimization...", file=sys.stderr)
 
-                # Find optimal font size and spacing scale
-                optimal_font_size, spacing_scale = self.find_optimal_scaling(content, format4x6, debug)
+                # Find optimal font size and spacing scale with verification
+                optimal_font_size, spacing_scale = self.find_optimal_scaling_with_verification(content, format4x6, debug)
 
                 if debug:
                     print(f"Optimal settings: font={optimal_font_size:.1f}pt, spacing_scale={spacing_scale:.2f}", file=sys.stderr)
