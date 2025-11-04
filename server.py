@@ -65,7 +65,7 @@ class PrinterMCPServer:
             print(f"Error counting PDF pages: {e}", file=sys.stderr)
             return 3  # Conservative fallback
 
-    def create_test_pdf(self, content: str, font_size: float, spacing_scale: float, debug: bool = False) -> Optional[str]:
+    def create_test_pdf(self, content: str, font_size: float, spacing_scale: float, filename: Optional[str] = None, debug: bool = False) -> Optional[str]:
         """Create a test PDF for page counting without adding to temp_files list."""
         if not REPORTLAB_AVAILABLE:
             return None
@@ -109,19 +109,63 @@ class PrinterMCPServer:
                 leading=font_size * max(1.1, 1.3 * spacing_scale)
             )
 
-            # Create simple test story (just first few lines to test)
-            story = []
-            lines = content.split('\n')[:10]  # Just test with first 10 lines
+            # Create heading styles to match final PDF
+            heading1_style = ParagraphStyle(
+                'TestHeading1',
+                parent=styles['Heading1'],
+                fontSize=font_size + 2.0,
+                spaceAfter=8,
+                spaceBefore=10,
+                leading=(font_size + 2.0) * 1.2
+            )
 
-            for line in lines:
-                line = line.strip()
-                if not line:
-                    story.append(Spacer(1, 6))
-                elif line.startswith('# '):
-                    story.append(Paragraph(line[2:], title_style))
-                else:
-                    story.append(Paragraph(line, body_style))
-                    story.append(Spacer(1, 3))
+            heading2_style = ParagraphStyle(
+                'TestHeading2',
+                parent=styles['Heading2'],
+                fontSize=font_size + 1.0,
+                spaceAfter=6,
+                spaceBefore=8,
+                leading=(font_size + 1.0) * 1.2
+            )
+
+            heading3_style = ParagraphStyle(
+                'TestHeading3',
+                parent=styles['Heading3'],
+                fontSize=font_size + 0.5,
+                spaceAfter=4,
+                spaceBefore=6,
+                leading=(font_size + 0.5) * 1.2
+            )
+
+            # Create simple test story (matches final PDF structure)
+            story = []
+
+            # Add title if filename provided (matches final PDF)
+            if filename:
+                story.append(Paragraph(filename, title_style))
+                story.append(Spacer(1, 15))  # Match final PDF spacing for 4x6
+
+            # Use the SAME content processing as final PDF for identical results
+            if MARKDOWN_AVAILABLE:
+                # Use mistune library for processing (identical to final PDF)
+                md = mistune.create_markdown(renderer='html')
+                html_content = md(content)
+
+                # Convert HTML to paragraphs (identical to final PDF)
+                paragraphs = self._html_to_paragraphs(html_content, body_style, heading1_style, heading2_style, heading3_style)
+                story.extend(paragraphs)
+            else:
+                # Fallback to simple processing if mistune not available
+                lines = content.split('\n')
+                for line in lines:
+                    line = line.strip()
+                    if not line:
+                        story.append(Spacer(1, 6))
+                    elif line.startswith('# '):
+                        story.append(Paragraph(line[2:], title_style))
+                    else:
+                        story.append(Paragraph(line, body_style))
+                        story.append(Spacer(1, 3))
 
             # Build test PDF
             doc.build(story)
@@ -514,7 +558,7 @@ class PrinterMCPServer:
 
         return best_font, best_spacing
 
-    def find_optimal_scaling_with_verification(self, content, format4x6, debug=False) -> tuple:
+    def find_optimal_scaling_with_verification(self, content, format4x6, filename=None, debug=False) -> tuple:
         """Enhanced auto-shrinking with actual PDF page count verification.
 
         Uses estimation for speed first, then creates test PDFs and verifies actual page count.
@@ -542,7 +586,7 @@ class PrinterMCPServer:
                 print(f"\nVerification iteration {iteration + 1}: font={current_font:.1f}pt, spacing={current_spacing:.2f}", file=sys.stderr)
 
             # Create test PDF to verify actual page count
-            test_pdf = self.create_test_pdf(content, current_font, current_spacing, debug)
+            test_pdf = self.create_test_pdf(content, current_font, current_spacing, filename, debug)
 
             if test_pdf and os.path.exists(test_pdf):
                 try:
@@ -552,8 +596,8 @@ class PrinterMCPServer:
                     if debug:
                         print(f"Actual page count: {actual_pages}", file=sys.stderr)
 
-                    # Success! Content fits on 2 pages
-                    if actual_pages <= 2:
+                    # Success! Content fits within safe margin (leave room for final PDF differences)
+                    if actual_pages <= 1:  # Conservative target to ensure final PDF stays within 2 pages
                         if debug:
                             print(f"SUCCESS: Content fits on {actual_pages} pages with font={current_font:.1f}pt, spacing={current_spacing:.2f}", file=sys.stderr)
                         # Clean up test PDF
@@ -741,7 +785,7 @@ class PrinterMCPServer:
                     print("Starting multi-dimensional font and spacing optimization...", file=sys.stderr)
 
                 # Find optimal font size and spacing scale with verification
-                optimal_font_size, spacing_scale = self.find_optimal_scaling_with_verification(content, format4x6, debug)
+                optimal_font_size, spacing_scale = self.find_optimal_scaling_with_verification(content, format4x6, filename, debug)
 
                 if debug:
                     print(f"Optimal settings: font={optimal_font_size:.1f}pt, spacing_scale={spacing_scale:.2f}", file=sys.stderr)
@@ -973,6 +1017,17 @@ class PrinterMCPServer:
             # Verify the PDF was created successfully
             if not os.path.exists(temp_file_path) or os.path.getsize(temp_file_path) == 0:
                 raise RuntimeError("PDF file was not created or is empty")
+
+            # Final verification: Check actual page count for 4x6 format
+            if format4x6:
+                final_pages = self.count_pdf_pages(temp_file_path)
+                if debug:
+                    print(f"Final PDF page count: {final_pages}", file=sys.stderr)
+
+                if final_pages > 2:
+                    raise Exception(f"Final PDF exceeded 2-page limit ({final_pages} pages). "
+                                  f"This indicates a serious issue with the auto-shrinking algorithm. "
+                                  f"Please try reducing content length or use regular page format.")
 
             return temp_file_path
 
