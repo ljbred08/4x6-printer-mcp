@@ -51,6 +51,8 @@ class PrinterMCPServer:
         self.temp_files = []  # Track temporary files for cleanup
         self.pdf_printer_path = self._get_pdf_printer_path()
         self.verified_pdf = None  # Store verified PDF for printing
+        self.final_font_size = None  # Store final font size used
+        self.final_spacing = None  # Store final spacing used
 
     def count_pdf_pages(self, pdf_file_path: str) -> int:
         """Count actual pages in generated PDF."""
@@ -286,6 +288,14 @@ class PrinterMCPServer:
             return "Error: ReportLab is required for PDF generation. Install with: pip install reportlab"
 
         try:
+            # Clear any cached verified PDF from previous jobs to ensure fresh content
+            if self.verified_pdf:
+                if debug:
+                    print(f"Clearing cached verified PDF from previous job: {self.verified_pdf}", file=sys.stderr)
+                self.verified_pdf = None
+                self.final_font_size = None
+                self.final_spacing = None
+
             # For 4x6 format, use the verified PDF from verification if available
             if format4x6 and self.verified_pdf and os.path.exists(self.verified_pdf):
                 if debug:
@@ -345,7 +355,14 @@ class PrinterMCPServer:
                     print(f"PDFtoPrinter stderr: {result.stderr}", file=sys.stderr)
 
             if result.returncode == 0:
-                return f"Successfully printed '{os.path.basename(pdf_file)}' on {printer_display}"
+                success_msg = f"Successfully printed '{os.path.basename(pdf_file)}' on {printer_display}"
+                # Add font/spacing details if available (from 4x6 verification)
+                if self.final_font_size is not None and self.final_spacing is not None:
+                    success_msg += f" (font={self.final_font_size:.1f}pt, spacing={self.final_spacing:.2f})"
+                    # Clear the stored values after use
+                    self.final_font_size = None
+                    self.final_spacing = None
+                return success_msg
             else:
                 return f"PDFtoPrinter error (code {result.returncode}): {result.stderr or 'Unknown error'}"
 
@@ -365,7 +382,7 @@ class PrinterMCPServer:
 
         # Available space for two 4x6 pages
         page_height = 4 * inch
-        margin = 0.25 * inch
+        margin = 0.1 * inch
         usable_height = (page_height - 2 * margin) * 2  # Two pages
 
         if debug:
@@ -473,7 +490,7 @@ class PrinterMCPServer:
         # Step 2: Test with ACTUAL final PDF creation
         current_font = estimated_font
         current_spacing = estimated_spacing
-        max_iterations = 10  # Prevent infinite loops
+        max_iterations = 20  # Allow more iterations to reach minimum font size
 
         for iteration in range(max_iterations):
             if debug:
@@ -486,7 +503,9 @@ class PrinterMCPServer:
                     filename=filename,
                     format4x6=True,
                     debug=debug,
-                    verification_mode=True  # Temporary mode for verification
+                    verification_mode=True,  # Temporary mode for verification
+                    current_font=current_font,
+                    current_spacing=current_spacing
                 )
 
                 if actual_pdf and os.path.exists(actual_pdf):
@@ -505,6 +524,8 @@ class PrinterMCPServer:
                             # Store the successful PDF for printing
                             successful_pdf = actual_pdf
                             self.verified_pdf = successful_pdf  # Store for later use
+                            self.final_font_size = current_font  # Store final font size
+                            self.final_spacing = current_spacing  # Store final spacing
                             return current_font, current_spacing
 
                         # Too many pages, need to shrink more
@@ -523,14 +544,18 @@ class PrinterMCPServer:
                                 current_spacing = max(0.6, current_spacing - 0.1)
                                 if debug:
                                     print(f"Reducing spacing to {current_spacing:.2f}", file=sys.stderr)
-                            elif current_font > 6.0:
+
+                            # Always try font reduction if we're still over 2 pages
+                            if current_font > 6.0:
                                 current_font = max(6.0, current_font - 0.5)
                                 if debug:
                                     print(f"Reducing font to {current_font:.1f}pt", file=sys.stderr)
-                            else:
-                                # We're at minimum readable font size and content still doesn't fit
+                            elif current_font <= 6.0 and current_spacing <= 0.6:
+                                # We're at minimum readable font size (6pt) and minimum spacing (0.6)
+                                # Content still doesn't fit even at absolute minimums
                                 raise Exception(f"Content is too long to fit on two 4x6 pages even at minimum readable font size (6pt) "
-                                              f"and minimum spacing (0.6). Content required {actual_pages} pages. "
+                                              f"and minimum spacing (0.6). Content required {actual_pages} pages with "
+                                              f"font={current_font:.1f}pt, spacing={current_spacing:.2f}. "
                                               f"Please reduce content length or use regular page format.")
 
                     except Exception as e:
@@ -567,7 +592,7 @@ class PrinterMCPServer:
         # Calculate available space for two 4x6 pages
         page_width = 6 * inch
         page_height = 4 * inch
-        margin = 0.25 * inch
+        margin = 0.1 * inch
         usable_height = (page_height - 2 * margin) * 2  # Two pages
         usable_width = page_width - 2 * margin
 
@@ -643,7 +668,8 @@ class PrinterMCPServer:
         return estimated_height <= usable_height
 
     def create_formatted_pdf(self, content: str, filename: Optional[str] = None,
-                            format4x6: bool = False, debug: bool = False, verification_mode: bool = False) -> Optional[str]:
+                            format4x6: bool = False, debug: bool = False, verification_mode: bool = False,
+                            current_font: Optional[float] = None, current_spacing: Optional[float] = None) -> Optional[str]:
         """Create a formatted PDF from content."""
         if not REPORTLAB_AVAILABLE:
             return None
@@ -667,7 +693,7 @@ class PrinterMCPServer:
                 # 4x6 index cards are typically used in landscape orientation
                 # So we make it 6" wide x 4" tall for proper use
                 page_size = (6 * inch, 4 * inch)  # 6x4 inches (landscape 4x6)
-                margin = 0.25 * inch
+                margin = 0.1 * inch
             else:
                 page_size = letter
                 margin = 0.75 * inch
@@ -693,8 +719,17 @@ class PrinterMCPServer:
                 # Find optimal font size and spacing scale with verification
                 # Skip verification if we're already in verification mode (to avoid circular dependency)
                 if verification_mode:
-                    # Use simple estimation for verification mode
-                    optimal_font_size, spacing_scale = self.find_optimal_scaling(content, format4x6, debug)
+                    # Use the passed current_font and current_spacing values for verification
+                    if current_font is not None and current_spacing is not None:
+                        optimal_font_size = current_font
+                        spacing_scale = current_spacing
+                        if debug:
+                            print(f"VERIFICATION MODE: Using passed values font={optimal_font_size:.1f}pt, spacing={spacing_scale:.2f}", file=sys.stderr)
+                    else:
+                        # Fallback: Use simple estimation if no values provided
+                        optimal_font_size, spacing_scale = self.find_optimal_scaling(content, format4x6, debug)
+                        if debug:
+                            print(f"VERIFICATION MODE: No values provided, using estimation font={optimal_font_size:.1f}pt, spacing={spacing_scale:.2f}", file=sys.stderr)
                 else:
                     # Use full verification for normal mode
                     optimal_font_size, spacing_scale = self.find_optimal_scaling_with_verification(content, format4x6, filename, debug)
